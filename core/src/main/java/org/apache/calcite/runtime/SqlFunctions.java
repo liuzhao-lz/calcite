@@ -1964,17 +1964,26 @@ public class SqlFunctions {
   }
 
   /** SQL {@code POSITION(seek IN string)} function. */
-  public static int position(String seek, String s) {
+  public static Integer position(String seek, String s) {
+    if (s == null) {
+      return null;
+    }
     return s.indexOf(seek) + 1;
   }
 
   /** SQL {@code POSITION(seek IN string)} function for byte strings. */
-  public static int position(ByteString seek, ByteString s) {
+  public static Integer position(ByteString seek, ByteString s) {
+    if (s == null) {
+      return null;
+    }
     return s.indexOf(seek) + 1;
   }
 
   /** SQL {@code POSITION(seek IN string FROM integer)} function. */
-  public static int position(String seek, String s, int from) {
+  public static Integer position(String seek, String s, int from) {
+    if (s == null) {
+      return null;
+    }
     final int from0 = from - 1; // 0-based
     if (from0 > s.length() || from0 < 0) {
       return 0;
@@ -1985,7 +1994,10 @@ public class SqlFunctions {
 
   /** SQL {@code POSITION(seek IN string FROM integer)} function for byte
    * strings. */
-  public static int position(ByteString seek, ByteString s, int from) {
+  public static Integer position(ByteString seek, ByteString s, int from) {
+    if (s == null) {
+      return null;
+    }
     final int from0 = from - 1;
     if (from0 > s.length() || from0 < 0) {
       return 0;
