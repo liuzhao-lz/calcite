@@ -195,7 +195,6 @@ import java.util.Deque;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -254,6 +253,8 @@ public class SqlToRelConverter {
   private int explainParamCount;
   public final SqlToRelConverter.Config config;
   private final RelBuilder relBuilder;
+
+  private Map<SqlValidatorNamespace, RelNode> nameToRelNode = Maps.newHashMap();
 
   /**
    * Fields used in name resolution for correlated sub-queries.
@@ -593,9 +594,8 @@ public class SqlToRelConverter {
     }
 
     final RelDataType validatedRowType = validator.getValidatedNodeType(query);
-    RelRoot origResult = RelRoot.of(result, validatedRowType, query.getKind())
-        .withCollation(collation);
-    return hackSelectStar(origQuery, origResult);
+    return RelRoot.of(result, validatedRowType, query.getKind())
+            .withCollation(collation);
   }
 
   /* OVERRIDE POINT */
@@ -621,16 +621,6 @@ public class SqlToRelConverter {
 
     //
     RelNode input = rootPrj.getInput();
-    //        if (!(//
-    //                isAmong(input, "OLAPTableScan", "LogicalJoin")//
-    //                || (isAmong(input, "LogicalFilter")
-    //                && isAmong(input.getInput(0), "OLAPTableScan", "LogicalJoin"))//
-    //             ))
-    //            return root;
-    //
-    //        if (rootPrj.getRowType().getFieldCount() < input.getRowType().getFieldCount())
-    //            return root;
-
     RelDataType inType = rootPrj.getRowType();
     List<String> inFields = inType.getFieldNames();
     List<RexNode> projExp = new ArrayList<>();
@@ -1159,15 +1149,24 @@ public class SqlToRelConverter {
 
       if (query instanceof SqlNodeList) {
         SqlNodeList valueList = (SqlNodeList) query;
-        if (!containsNullLiteral(valueList)
-            && valueList.size() < config.getInSubQueryThreshold()) {
+        if (!containsNullLiteral(valueList)) {
+          subQuery.expr = null;
+          // keep in clause.
+          if (Boolean.parseBoolean(System.getProperty("calcite.keep-in-clause", "false"))
+                  && (leftKeys.size() <= 1 || !Boolean.parseBoolean(
+                  System.getProperty("calcite.convert-multiple-columns-in-to-or", "false")))) {
+            subQuery.expr = constructIn(bb, leftKeys, valueList, call.getOperator().kind);
+          }
+
           // We're under the threshold, so convert to OR.
-          subQuery.expr =
+          if (subQuery.expr == null && valueList.size() < config.getInSubQueryThreshold()) {
+            subQuery.expr =
               convertInToOr(
-                  bb,
-                  leftKeys,
-                  valueList,
-                  (SqlInOperator) call.getOperator());
+                bb,
+                leftKeys,
+                valueList,
+                (SqlInOperator) call.getOperator());
+          }
           return;
         }
 
@@ -1302,6 +1301,24 @@ public class SqlToRelConverter {
     default:
       throw new AssertionError("unexpected kind of sub-query: "
           + subQuery.node);
+    }
+  }
+
+  private RexNode constructIn(Blackboard bb, List<RexNode> leftKeys, SqlNodeList valuesList,
+      SqlKind kind) {
+    List<RexNode> listRexNodes = new ArrayList<>(leftKeys);
+    for (SqlNode node : valuesList) {
+      listRexNodes.add(bb.convertExpression(node));
+    }
+
+    switch (kind) {
+    case NOT_IN:
+      return rexBuilder.makeCall(SqlStdOperatorTable.NOT_IN, listRexNodes);
+    case IN:
+    case SOME:
+      return rexBuilder.makeCall(SqlStdOperatorTable.IN, listRexNodes);
+    default:
+      return null;
     }
   }
 
@@ -2178,8 +2195,14 @@ public class SqlToRelConverter {
     case INTERSECT:
     case EXCEPT:
     case UNION:
-      final RelNode rel = convertQueryRecursive(from, false, null).project();
-      bb.setRoot(rel, true);
+      SqlValidatorNamespace namespace = validator.getNamespace(from).resolve();
+      if (namespace != null && nameToRelNode.get(namespace) != null) {
+        bb.setRoot(nameToRelNode.get(namespace), true);
+      } else {
+        final RelNode rel = convertQueryRecursive(from, false, null).project();
+        nameToRelNode.put(namespace, rel);
+        bb.setRoot(rel, true);
+      }
       return;
 
     case VALUES:
@@ -2579,8 +2602,11 @@ public class SqlToRelConverter {
       return call;
     case CAST:
       call = (RexCall) node;
-      operands = Lists.newArrayList(call.getOperands());
-      return operands.get(0);
+      RexNode expr = call.getOperands().get(0);
+      if (expr instanceof RexLiteral || expr instanceof RexDynamicParam) {
+        return call;
+      }
+      return expr;
     default:
       return node;
     }
@@ -4185,7 +4211,7 @@ public class SqlToRelConverter {
      * List of <code>IN</code> and <code>EXISTS</code> nodes inside this
      * <code>SELECT</code> statement (but not inside sub-queries).
      */
-    private final Set<SubQuery> subQueryList = new LinkedHashSet<>();
+    private final List<SubQuery> subQueryList = new ArrayList<>();
 
     /**
      * Workspace for building aggregates.
@@ -4512,17 +4538,12 @@ public class SqlToRelConverter {
       int fieldOffset = inputRef.getIndex();
       for (RelNode input : inputs) {
         RelDataType rowType = input.getRowType();
-        if (rowType == null) {
-          // TODO:  remove this once leastRestrictive
-          // is correctly implemented
-          return null;
-        }
         if (fieldOffset < rowType.getFieldCount()) {
           return rowType.getFieldList().get(fieldOffset);
         }
         fieldOffset -= rowType.getFieldCount();
       }
-      throw new AssertionError();
+      return null;
     }
 
     public void flatten(
@@ -4551,7 +4572,9 @@ public class SqlToRelConverter {
 
     void registerSubQuery(SqlNode node, RelOptUtil.Logic logic) {
       for (SubQuery subQuery : subQueryList) {
-        if (node.equalsDeep(subQuery.node, Litmus.IGNORE)) {
+        // Compare the reference to make sure the matched node has
+        // exact scope where it belongs.
+        if (node == subQuery.node) {
           return;
         }
       }
@@ -4560,7 +4583,9 @@ public class SqlToRelConverter {
 
     SubQuery getSubQuery(SqlNode expr) {
       for (SubQuery subQuery : subQueryList) {
-        if (expr.equalsDeep(subQuery.node, Litmus.IGNORE)) {
+        // Compare the reference to make sure the matched node has
+        // exact scope where it belongs.
+        if (expr == subQuery.node) {
           return subQuery;
         }
       }
