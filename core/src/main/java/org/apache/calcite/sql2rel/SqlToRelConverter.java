@@ -1152,9 +1152,7 @@ public class SqlToRelConverter {
         if (!containsNullLiteral(valueList)) {
           subQuery.expr = null;
           // keep in clause.
-          if (Boolean.parseBoolean(System.getProperty("calcite.keep-in-clause", "false"))
-                  && (leftKeys.size() <= 1 || !Boolean.parseBoolean(
-                  System.getProperty("calcite.convert-multiple-columns-in-to-or", "false")))) {
+          if (leftKeys.size() == 1 && !(leftKeys.get(0) instanceof RexLiteral)) {
             subQuery.expr = constructIn(bb, leftKeys, valueList, call.getOperator().kind);
           }
 
