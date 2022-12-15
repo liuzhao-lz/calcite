@@ -1152,7 +1152,7 @@ public class SqlToRelConverter {
         if (!containsNullLiteral(valueList)) {
           subQuery.expr = null;
           // keep in clause.
-          if (leftKeys.size() == 1 && !(leftKeys.get(0) instanceof RexLiteral)) {
+          if (leftKeys.size() == 1 && leftKeys.get(0) instanceof RexInputRef) {
             subQuery.expr = constructIn(bb, leftKeys, valueList, call.getOperator().kind);
           }
 
